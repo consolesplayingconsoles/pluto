@@ -163,6 +163,19 @@ def key(title):
     return re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")
 
 
+_DISC = re.compile(r"^Dis[ck]\s*(\d+)$", re.I)
+
+
+def disc(tags):
+    """'Disc 2' from a file's tags ("(Disc 2)", "(Disk 2)"), else None: a multi-disc game's discs
+    are different copies of one game and one variant, told apart only by this."""
+    for t in tags or []:
+        m = _DISC.match(t.strip())
+        if m:
+            return "Disc %d" % int(m.group(1))
+    return None
+
+
 def variant_label(variants):
     """'original', 'T-Cat', 'Boss Versus', 'T-Cat + Boss Versus' (versions left out)."""
     parts = [("T-" if v["kind"] == "translation" else "") + v["name"] for v in variants]
@@ -181,6 +194,9 @@ def canonical_name(title, file):
         out += " (%s)" % ", ".join(regions)
     # Release version only from the file's own (Rev x)/(vx) tag: parse() also reports a
     # variant's bracket version as `version`, which must not become the game's.
+    d = disc(file.get("tags"))
+    if d:
+        out += " (%s)" % d
     rev = next((m for m in (_REV_TAG.match(t.strip()) for t in file.get("tags") or []) if m), None)
     if rev:
         out += " (%s)" % ("Rev " + rev.group(1) if rev.group(1) else "v" + rev.group(2))

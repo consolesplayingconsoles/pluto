@@ -1211,6 +1211,18 @@ def test_send_plan_skips_what_the_target_has_and_prefers_lab_sources():
     assert send.strategy_for({"PS2_HDD_BYTES": "1"}) == "hdd" and send.strategy_for({}) is None
 
 
+def test_send_plan_keeps_each_disc_of_a_multi_disc_game_as_its_own_copy():
+    root = tempfile.mkdtemp()
+    doc = store.empty("saturn")
+    discs = ["Policenauts (Japan) (Disc %d) [T-En]/Policenauts (Japan) (Disc %d) [T-En].cue" % (n, n) for n in (1, 2, 3)]
+    store.merge(doc, "lab", [{"path": p, "header": None} for p in discs], NOW)
+    store.merge(doc, "saturn", [{"path": "SAROO/Policenauts (Disc 1) [T-En]/Policenauts (Disc 1) [T-En].cue", "header": None}], NOW)
+    os.makedirs(os.path.join(root, "saturn")); store.save(root, doc)
+    p = send.plan(root, "saturn", "saturn", ["lab"], all_missing=True)
+    assert sorted(c["name"] for c in p["copies"]) == ["Policenauts (Japan) (Disc 2) [T-En]", "Policenauts (Japan) (Disc 3) [T-En]"], p
+    assert names.canonical_name("Policenauts", {"regions": ["Japan"], "tags": ["Disk 2"], "variants": []}) == "Policenauts (Japan) (Disc 2)"
+
+
 def test_sd_strategy_copies_single_file_roms_and_skips_what_the_card_has():
     p = {"copies": [{"game": "a", "name": "Sonic (USA)", "source": {"node": "lab", "path": "Sonic (USA).zip", "inner": "Sonic (USA).md"}},
                     {"game": "b", "name": "Ecco (Europe)", "source": {"node": "batocera", "path": "Ecco (Europe).md"}},
@@ -1553,6 +1565,14 @@ def test_gdemu_ipbin_fields_follow_card_manager():
     assert (f["vga"], f["product"], f["serial"], f["disc"], f["region"]) == ("1", "IND470594", "IND-470594", "1/1", "JUE"), f
     f = send.ipbin_fields(_ipbin(serial=b"T23001D 50", periph=b"E000F00", device=b"0000 GD-ROM2/3  "))
     assert (f["vga"], f["product"], f["disc"]) == ("0", "T23001D", "2/3"), f
+
+
+def test_gdemu_ipbin_fields_never_carry_a_nul():
+    """A NUL in a field (DreamShell pads its serial with one) ended OPENMENU.INI for openMenu: the
+    entries after it were not in the menu."""
+    f = send.ipbin_fields(_ipbin(serial=b"DS-404REL\x00"))
+    assert (f["serial"], f["product"]) == ("DS-404REL", "DS404REL"), f
+    assert "\x00" not in send.openmenu_ini({10: f})
 
 
 def test_gdemu_repair_clears_half_written_slots_and_closes_the_gaps():

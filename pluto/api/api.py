@@ -3144,6 +3144,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         'systemctl is-active "$u" >/dev/null 2>&1 || echo "WARN $l will not automount again: $u is $(systemctl is-active "$u" 2>/dev/null)"; '
         'done')
 
+    # Repair for a card the console reads itself (SAROO's cart): the same sync + umount as SD_UMOUNT, then
+    # fsck on the unmounted volume -- fsck.exfat clears a dirty flag a cut-off write left up -- then the flag
+    # read back, so the answer is what the cart will see. FAT32 (EverDrive) gets fsck.fat. exfatprogs'
+    # exit code: 0 clean, 1 errors fixed, anything else is not fixed.
+    SD_REPAIR = (
+        'for l in "$@"; do d=$(sudo blkid -L "$l" 2>/dev/null); k=$(printf %s "$l" | tr -cd "A-Za-z0-9_-"); '
+        '[ -b "$d" ] || { echo "$l is not in the hub"; continue; }; '
+        'if grep -q "^$d " /proc/self/mounts; then '
+        'sync; if ! sudo umount "$d" 2>/dev/null; then sleep 2; sudo umount "$d" 2>/dev/null; fi; '
+        'if grep -q "^$d " /proc/self/mounts; then echo "WARN $l is busy, still mounted: nothing repaired"; continue; fi; '
+        'echo "$l unmounted"; fi; '
+        't=$(sudo blkid -s TYPE -o value "$d" 2>/dev/null); '
+        'case "$t" in '
+        'exfat) o=$(sudo fsck.exfat -p "$d" 2>&1); r=$?; '
+        'case "$r" in 0) echo "$l: no errors found" ;; 1) echo "$l: errors found and fixed" ;; '
+        '*) echo "WARN $l: fsck could not fix it (rc $r): $(printf %s "$o" | tail -n 2 | tr "\n" " ")" ;; esac ;; '
+        'vfat) o=$(sudo fsck.fat -a "$d" 2>&1); r=$?; '
+        'case "$r" in 0) echo "$l: no errors found" ;; 1) echo "$l: errors found and fixed" ;; '
+        '*) echo "WARN $l: fsck could not fix it (rc $r): $(printf %s "$o" | tail -n 2 | tr "\n" " ")" ;; esac ;; '
+        '*) echo "WARN $l is $t: nothing to repair here" ;; esac; '
+        'if [ "$t" = exfat ]; then '
+        'f=$(sudo dd if=$d bs=1 skip=106 count=1 2>/dev/null | od -An -tu1 | tr -d " \n"); '
+        'case "$f" in 2|3|6|7) echo "WARN $l is still marked dirty" ;; *) echo "$l is not marked dirty: safe to pull" ;; esac; fi; '
+        'u=$(systemd-escape -p --suffix=automount "/mnt/cpc-sd/$k" 2>/dev/null); '
+        '[ -n "$u" ] && sudo systemctl restart "$u" 2>/dev/null; '
+        'done')
+
     # What is on a card, for the terminal: each top-level entry, and the files inside each
     # folder with their sizes. Read-only (the automount mounts it on first access). A
     # two-digit folder with no disc.* is a GDEMU slot a failed send left half-written.
@@ -3184,6 +3211,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if action == "repair-sd":
             # GDEMU only: delete half-written slots, renumber the rest, rebuild openMenu's list
             cfg = (self.__class__.node_roster or {}).get(node_id) or {}
+            if catalogue_send.strategy_for(cfg, node_id) == "sd":
+                labels = [l.strip() for l in (cfg.get("SD_LABEL") or "").split(",") if l.strip()]
+                if catalogue.card_busy(labels):
+                    self._send(200, {"ok": False, "lines": ["a job is using this card: click Repair again when it is done"],
+                                     "error": "a job is using this card"}); return
+                rc, out = self._node_ssh("pi", ["sh", "-c", self.SD_REPAIR, "repair"] + labels,
+                                         timeout=600, connect_timeout=5)
+                if rc != 0:
+                    self._send(502, {"ok": False, "error": (out.strip()[-200:] or "rc %d" % rc)}); return
+                lines = [l for l in out.splitlines() if l.strip()]
+                print("  [NATIVE:%s] repair-sd: %s" % (node_id, " | ".join(lines)))
+                self._send(200, {"ok": not any(l.startswith("WARN") for l in lines), "lines": lines,
+                                 "error": next((l for l in lines if l.startswith("WARN")), "")}); return
             if catalogue_send.strategy_for(cfg, node_id) != "gdemu":
                 self._send(200, {"ok": False,
                                  "error": "native '%s' for %s is not implemented yet" % (action, node_id)}); return

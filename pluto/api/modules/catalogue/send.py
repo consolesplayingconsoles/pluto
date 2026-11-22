@@ -230,15 +230,15 @@ def plan(root, system, target, sources, files=None, all_missing=False):
     wanted = {(f["node"], f["path"]) for f in files or []}
     for g in view["games"]:
         present = [f for f in g["files"] if f["status"] == "present"]
-        on_target = {f["variant"] for f in present if f["node"] == target}
+        on_target = {(f["variant"], names.disc(f["tags"])) for f in present if f["node"] == target}
         by_variant = {}
         for f in present:
             if f["node"] == target or f["node"] not in rank:
                 continue
             if not all_missing and (f["node"], f["path"]) not in wanted:
                 continue
-            by_variant.setdefault(f["variant"], []).append(f)
-        for variant, candidates in sorted(by_variant.items()):
+            by_variant.setdefault((f["variant"], names.disc(f["tags"])), []).append(f)
+        for variant, candidates in sorted(by_variant.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")):
             best = min(candidates, key=lambda f: (rank[f["node"]], f["path"]))
             replace = variant in on_target
             if replace and not _ours(best):
@@ -489,7 +489,9 @@ def ipbin_fields(ip):
     peripherals character is '1', product = the serial without dashes, up to its first space."""
     if ip[:16] != b"SEGA SEGAKATANA ":
         raise ValueError("not a Dreamcast IP.BIN")
-    txt = lambda a, n: ip[a:a + n].decode("ascii", "replace").strip()
+    # a field ends at its first NUL (DreamShell pads its serial with one): a NUL left in the text
+    # ends OPENMENU.INI for openMenu's reader, and every entry after it vanishes from the menu
+    txt = lambda a, n: ip[a:a + n].decode("ascii", "replace").split("\x00")[0].strip()
     no, total = ip[0x2B:0x2C], ip[0x2D:0x2E]
     disc = "1/1" if b" " in (no, total) else "%s/%s" % (no.decode("ascii", "replace"), total.decode("ascii", "replace"))
     serial = txt(0x40, 10)
