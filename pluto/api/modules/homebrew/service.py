@@ -643,7 +643,7 @@ _PORT_BUILD = """set -eu
 : "${PORT_IMAGE:?PORT_IMAGE is not set: put PORT_IMAGE=\\"<the port build container>\\" in the .env of this decomp (%(env)s)}"
 echo "##STEP:build"
 set -o pipefail
-# the program is named after the game (native_build.py's last line: link: build/native/<game>)
+# the program is named after your disc image (GDI; native_build.py's last line: link: build/native/<its name>)
 docker run --rm -v "$PWD":/work -w /work "$PORT_IMAGE" python3 tools/10-port/native_build.py 2>&1 | while IFS= read -r l; do
     echo "$l"
     case "$l" in "link: "*) echo "##OUTPUT:$PWD/${l#link: }" ;; esac

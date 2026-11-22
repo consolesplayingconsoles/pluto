@@ -128,6 +128,13 @@ def _btctl(*args, **kw):
         return ""
 
 
+def _advertising(addr):
+    """`devices` lists every remote BlueZ has ever stored, switched off or not. A remote
+    that is on air during the running scan has an RSSI line in `info`; a stored one that
+    is off has none."""
+    return "RSSI:" in _btctl("info", addr, timeout=4)
+
+
 def _battery(addr):
     """hid-wiimote exposes the remote's battery as a power_supply named
     wiimote_battery_<address>. Percent, or None if it is not exposed (yet)."""
@@ -210,6 +217,8 @@ class WiimoteBridge:
                 for addr, name in parse_devices(_btctl("devices")):
                     if not is_wiimote(name) or time.time() - tried.get(addr, 0) < RETRY_S:
                         continue
+                    if not _advertising(addr):
+                        continue    # stored from an earlier pairing but not on air now
                     tried[addr] = time.time()
                     self._set(message="Found %s (%s), connecting" % (name, addr))
                     _btctl("trust", addr)

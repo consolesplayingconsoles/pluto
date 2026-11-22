@@ -4494,12 +4494,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not exe:
             return 400, {"error": "nothing built yet: run Build first"}
         box = self._port_box(item)
+        # the program's name is the disc image's ("Crazy Taxi (Europe) (En,Ja)"): passed as $2, never put in the script's text;
+        # the process is found again by its PID (port.pid), not by a pattern on its name
         script = (self._BATOCERA_QUIT +
-                  'pkill -f "$1/[%s]%s"; sleep 0.5; '
-                  '[ -x "$1/%s" ] || { echo "the port is not on Batocera yet: run Build first"; exit 1; }; '
-                  'cd "$1" && DISPLAY=:0 nohup "$1/%s" --data "$1/data" >"$1/port.log" 2>&1 </dev/null & '
-                  'echo started') % (exe[0], exe[1:], exe, exe)
-        rc, out = self._node_ssh(self.PORT_NODE, ["sh", "-c", script, "_", box], timeout=60, connect_timeout=10)
+                  '[ -f "$1/port.pid" ] && kill "$(cat "$1/port.pid")" 2>/dev/null; sleep 0.5; '
+                  '[ -x "$1/$2" ] || { echo "the port is not on Batocera yet: run Build first"; exit 1; }; '
+                  'cd "$1" && DISPLAY=:0 PORT_BOOT_LOG=1 PORT_DEBUG_TA=1 nohup "$1/$2" --data "$1/data" >"$1/port.log" 2>&1 </dev/null & '
+                  'echo $! >"$1/port.pid"; echo started')
+        rc, out = self._node_ssh(self.PORT_NODE, ["sh", "-c", script, "_", box, exe], timeout=60, connect_timeout=10)
         if rc != 0:
             return 502, {"error": (out or "could not reach Batocera").strip().splitlines()[-1]}
         return 200, {"started": item["id"], "log": box + "/port.log"}
@@ -4509,8 +4511,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         exe = self._port_exe(item)
         if not exe:
             return False                                # never built here: nothing of it runs on the box
-        rc, _ = self._node_ssh(self.PORT_NODE, ["pkill", "-f", "%s/[%s]%s" % (self._port_box(item), exe[0], exe[1:])],
-                               timeout=30, connect_timeout=10)
+        # by the PID Play saved: a pattern on the program's name missed it (a name with brackets, a program started under
+        # an earlier name), and the program ran on. A program Play started before it saved PIDs: by its data folder, which
+        # holds no brackets. The runtime does not end on SIGTERM (its threads hold the signal blocked): SIGKILL after 2 s
+        rc, _ = self._node_ssh(self.PORT_NODE, ["sh", "-c", 'p=$(cat "$1/port.pid" 2>/dev/null); '
+                                                'if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then kill "$p"; sleep 2; kill -9 "$p" 2>/dev/null; '
+                                                'else pkill -f -- "--data $1/data" || exit 1; sleep 2; pkill -9 -f -- "--data $1/data"; fi; '
+                                                'rm -f "$1/port.pid"; true',
+                                                "_", self._port_box(item)], timeout=30, connect_timeout=10)
         return rc == 0
 
     def _homebrew_script(self, item, action, emit):

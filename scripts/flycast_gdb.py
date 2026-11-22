@@ -2,6 +2,8 @@
 -config config:Debug.GDBEnabled=yes; port 3263). Stdlib only; any game.
 
     python3 scripts/flycast_gdb.py sample <seconds> <every> <out.json>   stop, read the registers, continue, repeatedly
+    python3 scripts/flycast_gdb.py trail <seconds> <every> <hex lo> <hex hi> <out.json> [stack words] [--game <lo> <hi>]   sample fast, keep the last 60 stops with
+                                                                        the words at r15, stop when the pc enters [lo, hi) (physical)
     python3 scripts/flycast_gdb.py mem <hex address> <length>           read memory (the CPU stops for it)
     python3 scripts/flycast_gdb.py write <hex address> <hex bytes>      write those bytes (memory order), the CPU stopped for it
     python3 scripts/flycast_gdb.py dump <hex address> <hex length> <out>     save that much memory to a file (video memory too:
@@ -87,6 +89,25 @@ def main():
             r.send('c')
         r.stop(); json.dump(rows,open(out,'w')); print('samples',len(rows)); 
         g=r.regs(); print('last pc %08X pr %08X sr %s r15 %08X'%(g['pc'],g['pr'],hex(g['sr']) if g['sr'] is not None else None,g['r'][15]))
+        r.send('c')
+    elif a[0]=='trail':   # trail <seconds> <every> <hex lo> <hex hi> <out.json> [stack words]: sample fast, keep the last 60 stops (registers and
+        # the words at r15), stop when the pc is in [lo, hi) (physical): the calls that led there. No breakpoints: only stops and continues
+        dur,every,lo,hi,out=float(a[1]),float(a[2]),int(a[3],16),int(a[4],16),a[5]; rest=a[6:]; nw=24
+        if rest and rest[0]!='--game': nw=int(rest[0]); rest=rest[1:]
+        game=(int(rest[1],16),int(rest[2],16)) if rest[:1]==['--game'] else None      # --game <lo> <hi>: armed only after the pc was once in the game's own code (the BIOS runs in low RAM before it)
+        armed=game is None; ring=[]; hit=None; t0=time.time(); r.send('c')
+        while time.time()-t0<dur:
+            time.sleep(every); r.stop(); g=r.regs()
+            if g:
+                row={'t':round(time.time()-t0,2),**g}
+                h=r.cmd('m%X,%X'%(g['r'][15],4*nw))
+                if h and not h.startswith('E') and len(h)>=8*nw: row['stack']=[int.from_bytes(bytes.fromhex(h[i:i+8]),'little') for i in range(0,8*nw,8)]
+                ring=(ring+[row])[-60:]
+                if not armed and game[0]<=(g['pc']&0x1FFFFFFF)<game[1]: armed=True; ring=[row]
+                elif armed and lo<=(g['pc']&0x1FFFFFFF)<hi: hit=row; break
+            r.send('c')
+        json.dump({'hit':hit,'trail':ring},open(out,'w'))
+        print('stops kept',len(ring),'| hit' if hit else '| range not entered','| last pc %08X pr %08X'%(ring[-1]['pc'],ring[-1]['pr']) if ring else '')
         r.send('c')
     elif a[0]=='bp':      # bp <seconds> <out.json> <hex address> [...]: stop at each address (software breakpoints), log the registers, continue
         dur,out=float(a[1]),a[2]; rest=a[3:]; after=0.0; rows=[]
