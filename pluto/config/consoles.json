@@ -115,6 +115,7 @@
     "ws":        ["wswan", "wswanc"],
     "ps3":       ["ps3"],
     "ps2":       ["ps2"],
+    "naomi":     ["naomi"],
     "vflash":    ["vflash"],
     "batocera":  ["*"],
     "lab":       ["*"]

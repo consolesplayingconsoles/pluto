@@ -28,6 +28,9 @@ keep the source file name (romsets are looked up by it).
                           mounts them from (there is no shell on a PS3)
   gdemu SD_LAYOUT=gdemu a GDEMU card: a game per numbered slot after openMenu's 01, and
                           openMenu's game list (OPENMENU.INI in 01's image) rewritten in place
+  netboot HOST_IP +     a board that loads one game into memory and boots it: nothing is
+        scripts/netboot.py  stored, so nothing is rescanned. The node holding the copy runs
+                          the target's netboot.py on its own file (ctx["boot"]); one game a send
 The caller (the API) never branches on the kind: it hands the plan to STRATEGIES.
 
 Pure stdlib, 3.6-safe, ASCII only.
@@ -73,6 +76,9 @@ def strategy_for(cfg, node=None):
         return "gdemu" if (cfg.get("SD_LAYOUT") or "").strip().lower() == "gdemu" else "sd"
     if (cfg.get("FTP_PATH") or "").strip():
         return "ftp"
+    # the node's dir holds scripts/netboot.py (discover_nodes tags it) and its .env the board's address
+    if cfg.get("_netboot") and (cfg.get("HOST_IP") or "").strip():
+        return "netboot"
     return None
 
 
@@ -877,6 +883,22 @@ def _repair_locked(card, emit, drop=()):
                 emit(line)
 
 
+def _netboot(p, ctx):
+    """A board that holds one game in memory: the send IS the boot. ctx["boot"](source) runs the
+    target's netboot.py where the copy is and -> (returncode, lines); its last line says why it
+    failed. The script unpacks a .zip/.7z and refuses anything but a .bin."""
+    if not p["copies"]:
+        return _nothing(ctx)
+    if len(p["copies"]) > 1:
+        raise NotAvailable("%s runs one game at a time: send a single game" % ctx["target"])
+    c = p["copies"][0]
+    rc, lines = ctx["boot"](c["source"])
+    if rc != 0:
+        why = [l.strip()[len("FAILED "):] for l in lines if l.strip().startswith("FAILED ")] or lines[-1:]
+        raise NotAvailable("%s did not boot %s: %s" % (ctx["target"], c["name"], why[-1] if why else "no output"))
+    return {"status": "done", "count": 1, "lines": lines}
+
+
 def _not_built(kind):
     def run(p, ctx):
         raise NotAvailable("sending games to %s (%s) is not built yet" % (ctx["target"], kind))
@@ -886,4 +908,4 @@ def _not_built(kind):
 # ftp joins _files: the API's card for it speaks the same mount/exists/put/finish words
 # over FTP that the others speak over SSH, so the copy loop does not change.
 STRATEGIES = {"local": _files, "batocera": _files, "sd": _files, "hdd": _hdd, "ftp": _files,
-              "gdemu": _gdemu}
+              "gdemu": _gdemu, "netboot": _netboot}

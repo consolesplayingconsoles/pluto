@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { useSlots, computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useSlots, computed, ref, watch, onMounted, onBeforeUnmount, inject } from 'vue'
+import { CONTROL_TARGET_ID } from './controlTarget'
 import ControlKeyboard from './ControlKeyboard.vue'
 import RoombaTelemetry from './RoombaTelemetry.vue'
 import RoombaCamera from './RoombaCamera.vue'
@@ -30,14 +31,20 @@ interface Props {
 
 const props = defineProps<Props>()
 
+// The selected target, from ControlTab (provide/inject), so the target-owned panels below
+// show whatever the source is. The prop stays only as a fallback for a layout mounted
+// outside the Control tab.
+const injectedTargetId = inject(CONTROL_TARGET_ID, null)
+const targetId = computed(() => injectedTargetId?.value || props.targetId || '')
+
 const shouldShowTelemetry = computed(() => props.target === 'roomba' && props.roombaIp)
 // SW is the target-owned slot: roomba telemetry for the roomba target, the Kindle
 // output (what the e-ink page is showing) for the kindle target. Source slots never
 // claim SW, so a target panel can't collide with one.
-const shouldShowKindle = computed(() => props.targetId === 'kindle')
+const shouldShowKindle = computed(() => targetId.value === 'kindle')
 // The NAOMI's cabinet events (coin, test, service) are the target's, not a source's, so
 // they ride the same target-owned slot and stay there whichever source is driving.
-const shouldShowNaomi = computed(() => props.targetId === 'naomi')
+const shouldShowNaomi = computed(() => targetId.value === 'naomi')
 // A GP2040-CE Pico (the 'pi' sink over a UART dev) owns SW too: its mode (gamepad or mouse) is the target's setting.
 const shouldShowPicoMode = computed(() => props.target === 'pi' && !!props.targetDev)
 defineEmits<{ 'drive-error': [msg: string] }>()
@@ -49,7 +56,7 @@ const slots = useSlots()
 // corner overlay on the video.
 const headed = computed(() => ({
   ne: !slots['ne'] && shouldShowCamera.value,
-  sw: shouldShowTelemetry.value || shouldShowKindle.value,
+  sw: shouldShowTelemetry.value || shouldShowKindle.value || shouldShowNaomi.value,
 }))
 // NE gets the roomba camera when target is roomba AND the source hasn't claimed the slot
 // (keyboard + DreamPicoPort both leave NE free). Mirrors the SW=telemetry hardcode.
@@ -89,6 +96,7 @@ const maxCells = computed<Set<Cell>>(() => {
   const s = new Set<Cell>(props.maxCells ?? [])
   if (shouldShowCamera.value) s.add('ne')   // roomba camera opts itself in
   if (shouldShowKindle.value) s.add('sw')   // so does the kindle output
+  if (shouldShowNaomi.value) s.add('sw')    // and the Naomi panel, whose controls map outgrows a quarter
   return s
 })
 // No fullscreen on the phone/narrow layout -- it's already a scrollable stack.
@@ -162,7 +170,7 @@ function cellStyle(cell: 'nw' | 'ne' | 'sw' | 'se') {
         </button>
         <slot name="ne"><RoombaCamera v-if="shouldShowCamera" :node="targetDev" :active="active" /></slot>
       </div>
-      <div v-if="shouldShowTelemetry || shouldShowKindle || shouldShowNaomi || shouldShowPicoMode" class="quad" :class="{ 'quad--headed': headed.sw }" :style="isNarrow ? undefined : cellStyle('sw')">
+      <div v-if="shouldShowTelemetry || shouldShowKindle || shouldShowNaomi || shouldShowPicoMode" class="quad" :class="{ 'quad--headed': headed.sw, 'quad--tabbed': shouldShowNaomi }" :style="isNarrow ? undefined : cellStyle('sw')">
         <button v-if="canMax('sw')" class="quad-max" :class="{ on: maxCell === 'sw' }"
           @click="toggleMax('sw')"
           :title="maxCell === 'sw' ? 'Exit fullscreen (Esc)' : 'Fullscreen'"
@@ -259,9 +267,13 @@ function cellStyle(cell: 'nw' | 'ne' | 'sw' | 'se') {
   color: var(--text-muted);
 }
 .quad--headed .quad-max:hover { background: var(--surface-2); color: var(--accent); }
+/* A panel that heads with a sub-tab bar (Naomi: Events / Controls): the bar is a fixed 40px,
+   so the 28px button centres on it at (40 - 28) / 2, and sits 12px in like the bar's own padding. */
+.quad--tabbed .quad-max { top: 6px; right: 12px; }
 .quad--headed :deep(.cam__head),
 .quad--headed :deep(.tel__head),
-.quad--headed :deep(.knd__head) { padding-right: 40px; }
+.quad--headed :deep(.knd__head),
+.quad--headed :deep(.nc__tabs) { padding-right: 40px; }
 .quad:hover .quad-max,
 .quad-max:focus-visible,
 .quad-max.on {

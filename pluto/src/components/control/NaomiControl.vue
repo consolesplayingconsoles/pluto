@@ -10,9 +10,43 @@
 // as PSW1 and PSW2), so we send the existing drive protocol's hold down then up rather
 // than inventing an event verb: a brief closure is exactly what the hardware does, and
 // OpenJVS counts a coin on the press edge.
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { driveBase } from '../../lib/drive'
+import { API_BASE } from '../../composables/useNodes'
 import UiButton from '../ui/UiButton.vue'
+import UiSelect from '../ui/UiSelect.vue'
+import UiSubTabs from '../ui/UiSubTabs.vue'
+
+const tab = ref<'events' | 'controls'>('events')
+
+// OpenJVS's game maps, read off the node that runs it: one map at a time, the one picked in
+// the select (the one OpenJVS runs, its DEFAULT_GAME, until you pick another). Read only:
+// picking a game shows its map, it does not change what OpenJVS runs.
+interface MapRow { input: string; controller: string; output: string; player: string; file: string }
+const jvsGames = ref<string[]>([])
+const jvsCurrent = ref('')
+const jvsGame = ref('')
+const jvsRows = ref<MapRow[]>([])
+const jvsError = ref('')
+const jvsLoading = ref(false)
+async function loadMap(game = jvsGame.value) {
+  jvsLoading.value = true
+  jvsError.value = ''
+  try {
+    const r = await fetch(`${API_BASE}/openjvs/map` + (game ? `?game=${encodeURIComponent(game)}` : ''))
+    const j = await r.json().catch(() => null)
+    if (!r.ok || !j) throw new Error(j?.error || `openjvs map -> ${r.status}`)
+    jvsGames.value = Array.isArray(j.games) ? j.games : []
+    jvsCurrent.value = j.current || ''
+    jvsGame.value = j.game || ''
+    jvsRows.value = Array.isArray(j.rows) ? j.rows : []
+  } catch (e) {
+    jvsError.value = e instanceof Error ? e.message : 'could not read the OpenJVS map'
+  } finally {
+    jvsLoading.value = false
+  }
+}
+onMounted(() => loadMap(''))
 
 const props = defineProps<{ active: boolean; target: string; source: string; mapping: string }>()
 const emit = defineEmits<{ 'drive-error': [msg: string] }>()
@@ -58,7 +92,10 @@ async function pulse(btn: string, label: string) {
 
 <template>
   <div class="nc">
-    <p class="nc__lbl">Cabinet</p>
+    <!-- A quarter of the screen holds one view at a time: the cabinet events or the controls map. -->
+    <UiSubTabs v-model="tab" class="nc__tabs" :tabs="[{ key: 'events', label: 'Events' }, { key: 'controls', label: 'Controls' }]" />
+    <div class="nc__body">
+    <template v-if="tab === 'events'">
     <!-- Service then Test, matching the filter board silkscreen, which reads PSW2 PSW1
          left to right (PSW1 = Test, PSW2 = Service). The coin has no place on that board
          at all -- it arrives over JVS -- so it leads, as the one a player would use. -->
@@ -71,13 +108,51 @@ async function pulse(btn: string, label: string) {
       <UiButton :disabled="!active || busy === 'TEST'" @click="pulse('TEST', 'Test')">Test</UiButton>
     </div>
     <p v-if="note" class="nc__note">{{ note }}</p>
+    </template>
+
+    <template v-else>
+    <div class="nc__map-head">
+      <p class="nc__lbl">OpenJVS map</p>
+      <UiSelect v-if="jvsGames.length" class="nc__pick" :model-value="jvsGame" :disabled="jvsLoading"
+        @update:model-value="loadMap">
+        <option v-for="g in jvsGames" :key="g" :value="g">{{ g }}{{ g === jvsCurrent ? ' (running)' : '' }}</option>
+      </UiSelect>
+      <UiButton class="nc__reload" :disabled="jvsLoading" title="Read the map again" @click="loadMap()">Reload</UiButton>
+    </div>
+    <p v-if="jvsError" class="nc__note">{{ jvsError }}</p>
+    <p v-else-if="jvsLoading && !jvsRows.length" class="nc__note">Reading the map…</p>
+    <p v-else-if="!jvsGame" class="nc__note">OpenJVS names no DEFAULT_GAME: pick a game to see its map.</p>
+    <table v-else class="nc__map">
+      <tbody>
+        <tr v-for="(r, i) in jvsRows" :key="i" :title="'from games/' + r.file">
+          <td>{{ r.input }}</td>
+          <td>{{ r.controller }}</td>
+          <td class="nc__out">{{ r.output }}</td>
+          <td>{{ r.player }}</td>
+        </tr>
+      </tbody>
+    </table>
+    </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.nc { padding: 12px; }
+/* The quadrant clips (overflow: hidden): the tabs stay put and the body scrolls itself, since the map can be longer than the cell. */
+.nc { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+/* A fixed 40px bar (tabs stretched to it, underline at the bottom) so the quadrant's fullscreen
+   button can centre on it exactly: ControlLayout's .quad--tabbed puts the 28px button at top 6px. */
+.nc__tabs { padding-left: 12px; padding-right: 12px; height: 40px; box-sizing: border-box; align-items: stretch; }
+/* The tab's main area: the same white as the tab bar above it, so the two read as one surface. */
+.nc__body { flex: 1; min-height: 0; overflow: auto; padding: 12px; background: var(--surface); }
 .nc__lbl { margin: 0 0 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
 .nc__row { display: flex; flex-wrap: wrap; gap: 8px; }
 .nc__coin { font-size: 17px; line-height: 1; padding-left: 14px; padding-right: 14px; }
 .nc__note { margin: 10px 0 0; font-size: 12px; color: var(--text-muted); }
+.nc__map-head { display: flex; align-items: center; gap: 8px; }
+.nc__map-head .nc__lbl { margin: 0; white-space: nowrap; }
+.nc__pick { flex: 1; min-width: 0; font-family: var(--font-mono); }
+.nc__map { width: 100%; margin-top: 8px; border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+.nc__map td { padding: 3px 8px 3px 0; border-top: 1px solid var(--line); white-space: nowrap; }
+.nc__out { color: var(--text); }
 </style>

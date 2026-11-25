@@ -3,7 +3,8 @@
 // selections (all in the URL: /control/{source}/{target}/{mapping}) and renders
 // the source child: Dreame Cloud (Robutek), Keyboard only (ControlKeyboard), or Claude
 // (ClaudeControl). The on-screen keyboard is the one unified controller across all three.
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, ref, watch, onMounted, provide } from 'vue'
+import { CONTROL_TARGET_ID } from './controlTarget'
 import { useRoute, useRouter } from 'vue-router'
 import { driveHost } from '../../lib/drive'
 import type { NodeMap } from '../../composables/useNodes'
@@ -159,6 +160,8 @@ function pick(level: 'source' | 'target' | 'mapping', v: string) {
 // The selected flat target -> the first real output when the URL has none.
 const effTarget = computed(() => target.value || (targetOptions.value.find(t => t.id !== 'none')?.id || 'none'))
 const curTarget = computed<FlatTarget>(() => targetOptions.value.find(t => t.id === effTarget.value) || targetOptions.value[0])
+// Straight to ControlLayout, whatever the source: the target-owned panels key off it.
+provide(CONTROL_TARGET_ID, effTarget)
 // The mapping must MATCH the target's sink: a roomba mapping carries `actions` (button
 // -> roomba verb) only the roomba sink understands; console mappings drive a pad and have
 // no actions. So the dropdown only offers mappings compatible with the target KIND:
@@ -199,6 +202,10 @@ const LAST_URL_KEY = 'cpc.control.lastUrl'
 
 watch([source, target, mapping, mappings, targetOptions, sourceList, host, () => props.active], () => {
   if (!props.active) return
+  // The full chat (/command) is an overlay that keeps this tab "active" underneath it; its URL
+  // has no source, so canonicalizing here would replace it with the last Control URL and the
+  // chat would never open. Only a real Control route is ours to canonicalize.
+  if (route.name !== 'control') return
   // Bad host segment (an old link, or none): once the roster's loaded, snap to the default
   // host so the URL always names a real host (the canon re-runs and fills the source).
   if (hosts.value.length && !hosts.value.some(h => h.id === host.value)) {

@@ -47,6 +47,7 @@ from modules.catalogue import names as catalogue_names
 from modules.homebrew import service as homebrew
 from modules.fxos import listen as fxos_listen
 from modules.services import service as node_services
+from modules.openjvs import gamemap as openjvs_gamemap
 
 
 def open_path(path):
@@ -1399,6 +1400,8 @@ def discover_nodes(base_dir):
                 sys.exit(1)
             cfg["_kind"]    = kind
             cfg["_has_env"] = has_env
+            # a board that netboots: the dir holds the script that sends it a game (send.py "netboot")
+            cfg["_netboot"] = os.path.isfile(os.path.join(d, "scripts", "netboot.py"))
             roster[name]    = cfg
     return roster
 
@@ -2611,6 +2614,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif parts and parts[0] == "mappings":
             self._handle_mappings(parts)
 
+        elif parsed.path == "/openjvs/map":
+            self._handle_openjvs_map((urllib.parse.parse_qs(parsed.query).get("game") or [""])[0])
         elif len(parts) == 2 and parts[0] == "services":
             self._handle_services(parts[1])
 
@@ -2693,6 +2698,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 timeout=20, connect_timeout=6)
         self._send(200, {"node": node_id,
                          "services": node_services.parse_status(services, out)})
+
+    def _handle_openjvs_map(self, want=""):
+        """GET /openjvs/map[?game=<name>] -> {node, current, games, game, rows}: the game maps
+        OpenJVS has (games/), the one it runs (current = DEFAULT_GAME in its config), and the
+        rows of `game` -- the one asked for, else the current one -- with every INCLUDE
+        resolved. Read over SSH from the node that declares the openjvs service (services.json:
+        declared where it RUNS). READ ONLY: asking for a game only shows it."""
+        node = next((n for n in sorted(self.__class__.node_roster or {})
+                     if node_services.find(node_services.load(self.__class__.base_dir, n), "openjvs")), None)
+        if not node:
+            self._send(404, {"error": "no node declares an openjvs service"}); return
+
+        def read(path):
+            rc, out = self._node_ssh(node, ["cat", path], timeout=20, connect_timeout=6)
+            if rc != 0:
+                raise RuntimeError((out.strip().splitlines() or ["rc %d" % rc])[-1])
+            return out
+        try:
+            current = openjvs_gamemap.default_game(read(openjvs_gamemap.CONFIG))
+            rc, out = self._node_ssh(node, ["ls", "-1", openjvs_gamemap.GAMES], timeout=20, connect_timeout=6)
+            if rc != 0:
+                raise RuntimeError((out.strip().splitlines() or ["rc %d" % rc])[-1])
+        except Exception as exc:
+            self._send(502, {"node": node, "error": "could not read OpenJVS on %s: %s" % (node, exc)}); return
+        games = sorted(n.strip() for n in out.splitlines() if n.strip() and not n.startswith("."))
+        if want and want not in games:
+            self._send(404, {"node": node, "error": "OpenJVS on %s has no game map %r" % (node, want)}); return
+        game = want or current
+        rows = openjvs_gamemap.resolve(game, lambda name: read("%s/%s" % (openjvs_gamemap.GAMES, name))) if game else []
+        self._send(200, {"node": node, "current": current, "games": games, "game": game, "rows": rows})
 
     def _handle_service_op(self, node_id, service_id, op):
         """POST /services/<node>/<service>/<op> -- op is start, stop or restart.
@@ -5222,6 +5257,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
             emit(line)
         return p.wait(), lines
 
+    def _netboot_run(self, target, cfg, system, src, emit):
+        """Boot one copy on a netboot board (send.py "netboot"): the node that holds the copy runs
+        nodes/local/<target>/scripts/netboot.py on its own file -- the Lab here, Batocera over SSH
+        with the script on stdin (`python3 -`, as the scan goes) -- so the game travels once.
+        Every output line goes to emit. -> (returncode, lines)."""
+        script = os.path.normpath(os.path.join(self.__class__.base_dir, "..", "nodes", "local", target, "scripts", "netboot.py"))
+        ip = (cfg.get("HOST_IP") or "").strip()
+        rel = os.path.normpath(src.get("path") or "")
+        if not rel or rel.startswith("..") or os.path.isabs(rel):
+            raise catalogue_send.NotAvailable("bad path")
+        if src["node"] == "lab":
+            path = self._lab_rom(system, rel)
+            if not path or not os.path.isfile(path):
+                raise catalogue_send.SourceUnavailable("%s is not in the Lab library" % rel)
+            argv, stdin = [sys.executable, "-u", script, ip, path], None
+        elif src["node"] == "batocera":
+            prefix = self._node_ssh_prefix("batocera")
+            if not prefix:
+                raise catalogue_send.NotAvailable("batocera has no ssh config")
+            import shlex
+            remote = " ".join(shlex.quote(a) for a in ["python3", "-u", "-", ip, "/userdata/roms/%s/%s" % (system, rel)])
+            argv = prefix[:1] + ["-o", "ConnectTimeout=10"] + prefix[1:] + [remote]
+            with open(script, "rb") as f:
+                stdin = f.read()
+        else:
+            raise catalogue_send.NotAvailable("%s's copy can't boot on %s: send a Lab or Batocera copy" % (src["node"], target))
+        if not self._boot_lock.acquire(blocking=False):
+            raise catalogue_send.NotAvailable("a boot is already in progress")
+        try:
+            p = subprocess.Popen(argv, stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if stdin:
+                p.stdin.write(stdin)
+                p.stdin.close()
+            lines = []
+            for raw in p.stdout:
+                line = raw.decode("utf-8", "replace").rstrip("\n")
+                lines.append(line)
+                emit(line)
+            rc = p.wait()
+        finally:
+            self._boot_lock.release()
+        print("  [NETBOOT:%s] %s:%s rc=%d" % (target, src["node"], rel, rc))
+        return rc, lines
+
     def _handle_catalogue_send(self, system, body):
         """POST form of the send (see _catalogue_send_run): one JSON answer at the end."""
         lines = []
@@ -5305,6 +5385,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ctx = {"target": target, "system": system, "locate": locate, "emit": emit,
                "command": lambda args: self._admin_command(target, args),
                "run": (lambda args: self._ps2_hub_run(target, args, emit)) if kind == "hdd" and self._ps2_hub(target) else None,
+               "boot": (lambda src: self._netboot_run(target, target_cfg, system, src, emit)) if kind == "netboot" else None,
                "rom_ext": lambda src: self._send_rom_ext(system, src), "unpack": kind == "sd",
                "layout": (target_cfg.get("SD_LAYOUT") or "").strip().lower() if kind == "sd" else "",
                "card": self._send_dest(kind, target, target_cfg, system, ctx_emit=emit) if kind in ("local", "batocera", "sd", "ftp", "gdemu") else None,
@@ -6178,7 +6259,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 sd_nodes=self._catalogue_sd_nodes(), ftp_nodes=self._catalogue_ftp_nodes(),
                 ftp_client=self._ftp_client(),
                 admin_nodes={n: self._admin_command(n, ["sync"]) for n in self._catalogue_admin_nodes()},
-                hdd_nodes=self._catalogue_hdd_nodes())
+                hdd_nodes=self._catalogue_hdd_nodes(),
+                boot_nodes=[n for n, c in (self.__class__.node_roster or {}).items()
+                            if catalogue_send.strategy_for(c, n) == "netboot"])
             emit("done", "ok")          # per-node / per-system failures are WARN lines above
         except Exception as exc:
             emit("line", "sync crashed: %s" % exc)

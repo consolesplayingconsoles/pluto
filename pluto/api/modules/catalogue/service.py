@@ -546,7 +546,7 @@ def _scan_ftp(client, host, dirs):
 
 
 def sync(root, system, consoles_config, run_ssh, saves_lookup, emit, now, roms=BATOCERA_ROMS, lab_roms=None, sd_nodes=None,
-         admin_nodes=None, only=None, ftp_nodes=None, ftp_client=None, hdd_nodes=None):
+         admin_nodes=None, only=None, ftp_nodes=None, ftp_client=None, hdd_nodes=None, boot_nodes=None):
     """Sync one system ('*' = everything). emit(line) streams progress.
     consoles_config = config/consoles.json (nodeConsoles for hosts, systems for headers).
 
@@ -562,6 +562,8 @@ def sync(root, system, consoles_config, run_ssh, saves_lookup, emit, now, roms=B
     command to run in Terminal, which reads the drive and POSTs it back (merge_posted).
     hdd_nodes = {node: list_files} for such a drive on a machine Pluto reaches with sudo (the
     PS2 HDD on the Pi hub): list_files() -> [{"path", "size"}], scanned like any node.
+    boot_nodes = nodes that boot what they are sent and keep no library (send.py "netboot"):
+    passed over without a line.
 
     Two phases. SCANS run in parallel, one thread per node: they only read. MERGES then
     run one at a time on this thread, because two nodes can write the same system's
@@ -617,6 +619,8 @@ def sync(root, system, consoles_config, run_ssh, saves_lookup, emit, now, roms=B
                                         "gamelist": ""}})
     admin_nodes = admin_nodes or {}
     for node in hosts:
+        if node in (boot_nodes or ()):
+            continue                    # boots what it is sent and stores nothing: no library to scan
         if node in admin_nodes:
             emit("%s: needs admin, run in Terminal: %s" % (node, admin_nodes[node]))
         elif node not in jobs and (system != "*" or "*" in node_consoles[node]):
